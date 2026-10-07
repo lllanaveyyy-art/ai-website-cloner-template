@@ -30,5 +30,8 @@ No production email provider is configured in this portfolio deployment. Custome
 - `AI_GATEWAY_MODEL`
 - Optional test-only: `SIMULATE_AI_FAILURE=1`
 
+## Database setup
+Run `db/schema.sql` against a PostgreSQL/Neon database, then configure `.env.local` from `.env.example`.
+
 ## Commands
 `npm run build` · `npm run typecheck` · `npm run lint` · `npm test`

@@ -68,6 +68,7 @@ export function followUpHours(priority: Analysis["priority"]) {
 
 export async function analyseLead(input: LeadInput): Promise<Analysis> {
   if (process.env.SIMULATE_AI_FAILURE === "1") throw new Error("Simulated AI failure");
+  if (process.env.LIVE_AI_ENABLED !== "1") throw new Error("Live AI provider is not configured; deterministic fallback is active.");
 
   const model = process.env.AI_GATEWAY_MODEL ?? "openai/gpt-5.4-nano";
   const { output } = await generateText({

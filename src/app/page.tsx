@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
+import { useActionState, useRef } from "react";
 import Link from "next/link";
 import { submitLead, type ActionState } from "./actions";
 
@@ -8,8 +8,7 @@ const initialState: ActionState = { ok: false, message: "" };
 
 export default function Home() {
   const [state, action, pending] = useActionState(submitLead, initialState);
-  const [idempotencyKey, setIdempotencyKey] = useState("");
-  useEffect(() => setIdempotencyKey(crypto.randomUUID()), []);
+  const idempotencyRef = useRef<HTMLInputElement>(null);
 
   return (
     <main className="public-shell">
@@ -31,8 +30,8 @@ export default function Home() {
         <div className="form-card">
           <h2>Tell us what you need</h2>
           <p className="subtle">A concise brief is enough. Required fields are marked.</p>
-          <form action={action}>
-            <input type="hidden" name="idempotencyKey" value={idempotencyKey}/>
+          <form action={action} onSubmit={() => { if (idempotencyRef.current && !idempotencyRef.current.value) idempotencyRef.current.value = crypto.randomUUID(); }}>
+            <input ref={idempotencyRef} type="hidden" name="idempotencyKey" defaultValue=""/>
             <div className="field-grid">
               <div className="field"><label htmlFor="name">Name *</label><input id="name" name="name" required minLength={2}/></div>
               <div className="field"><label htmlFor="company">Company *</label><input id="company" name="company" required minLength={2}/></div>
@@ -43,7 +42,7 @@ export default function Home() {
               <div className="field full"><label htmlFor="budgetRange">Budget range</label><select id="budgetRange" name="budgetRange" defaultValue=""><option value="">Not specified</option><option>Under $5k</option><option>$5k–$15k</option><option>$15k–$25k</option><option>$25k–$50k</option><option>$50k+</option></select></div>
               <div className="field full"><label htmlFor="message">Project brief *</label><textarea id="message" name="message" required minLength={15} placeholder="We have a team of 35 people and need a new CRM. We currently use spreadsheets and want to migrate before January."/></div>
             </div>
-            <button className="btn btn-primary" disabled={pending || !idempotencyKey} type="submit">{pending ? "Processing workflow…" : "Submit request"}</button>
+            <button className="btn btn-primary" disabled={pending} type="submit">{pending ? "Processing workflow…" : "Submit request"}</button>
             {state.message && <div role="status" className={`form-status ${state.ok ? "ok" : "error"}`}>{state.message}</div>}
           </form>
         </div>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analysisSchema, fallbackAnalysis, followUpHours, leadInputSchema } from "../src/lib/workflow";
+import { analyseLead, analysisSchema, fallbackAnalysis, followUpHours, leadInputSchema } from "../src/lib/workflow";
 
 describe("workflow business logic", () => {
   it("classifies an urgent 35-person CRM request as high priority in fallback mode", () => {
@@ -23,5 +23,22 @@ describe("workflow business logic", () => {
   it("rejects invalid structured AI output", () => {
     const result=analysisSchema.safeParse({category:"CRM",requestType:"Implementation",urgency:"ASAP",estimatedValue:"High",department:"Sales",priority:"High",summary:"short",recommendedAction:"call"});
     expect(result.success).toBe(false);
+  });
+  it("keeps live AI disabled by default so fallback remains zero-cost", async () => {
+    const previous = process.env.LIVE_AI_ENABLED;
+    delete process.env.LIVE_AI_ENABLED;
+    await expect(analyseLead({
+      idempotencyKey:"00000000-0000-4000-8000-000000000001",
+      name:"Demo User",
+      company:"Demo Company",
+      email:"demo@example.com",
+      phone:"",
+      companySize:12,
+      serviceNeeded:"Workflow Automation",
+      budgetRange:"$5k–$15k",
+      message:"We need a safe portfolio workflow automation demo."
+    })).rejects.toThrow(/deterministic fallback/i);
+    if (previous === undefined) delete process.env.LIVE_AI_ENABLED;
+    else process.env.LIVE_AI_ENABLED = previous;
   });
 });

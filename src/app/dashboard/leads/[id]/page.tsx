@@ -18,7 +18,7 @@ export default async function LeadDetail({ params }: { params: Promise<{id:strin
     sql`SELECT * FROM notes WHERE lead_id=${id} ORDER BY created_at DESC`,
     sql`SELECT * FROM workflow_runs WHERE lead_id=${id} ORDER BY started_at DESC`,
     sql`SELECT * FROM follow_ups WHERE lead_id=${id} ORDER BY due_at DESC`,
-    sql`SELECT email_type,to_email,status,error_message,created_at FROM email_outbox WHERE lead_id=${id} ORDER BY created_at DESC`,
+    sql`SELECT email_type,to_email,subject,body,status,error_message,provider_message_id,created_at,updated_at FROM email_outbox WHERE lead_id=${id} ORDER BY created_at DESC`,
     sql`SELECT * FROM notifications WHERE lead_id=${id} ORDER BY created_at DESC`
   ]);
 
@@ -78,7 +78,15 @@ export default async function LeadDetail({ params }: { params: Promise<{id:strin
           </div></section>
 
           <section className="panel"><div className="panel-head"><h3>Email outbox</h3><span className="subtle">Provider not configured</span></div><div className="panel-body">
-            {outbox.map(o=><div className="note" key={`${o.email_type}-${o.created_at}`}><strong>{String(o.email_type).replaceAll("_"," ")}</strong><div className="subtle">{String(o.to_email)} · {String(o.status)}</div></div>)}
+            {outbox.map(o=><div className="note" key={`${o.email_type}-${o.created_at}`}>
+              <div className="note-meta">{new Date(String(o.created_at)).toLocaleString("en-GB")} · {String(o.status)}</div>
+              <strong>{String(o.subject)}</strong>
+              <div className="subtle">To: {String(o.to_email)}</div>
+              <div style={{marginTop:6}}>{String(o.body)}</div>
+              {o.error_message&&<div className="error-copy">Not sent: {String(o.error_message)}</div>}
+              {String(o.status)==="pending_setup"&&<div className="subtle" style={{marginTop:4}}>Not sent: outbound email provider is intentionally not configured for this portfolio deployment.</div>}
+              {o.provider_message_id&&<div className="subtle mono" style={{marginTop:4}}>Provider ID: {String(o.provider_message_id)}</div>}
+            </div>)}
             {!outbox.length && <div className="subtle">No email records.</div>}
           </div></section>
 

@@ -224,60 +224,203 @@ async function continueWorkflow(runId: string, leadId: string, input: LeadInput)
 
 export async function retryWorkflow(runId: string) {
   const sql = db();
-  const runs = await sql`
-    SELECT wr.*, l.name,l.company,l.email,l.phone,l.company_size,l.service_needed,l.budget_range,l.message,l.idempotency_key
-    FROM workflow_runs wr JOIN leads l ON l.id=wr.lead_id WHERE wr.id=${runId} LIMIT 1`;
-  if (runs.length === 0) throw new Error("Workflow not found.");
-  const run = runs[0];
-  if (Number(run.retry_count) >= 3) throw new Error("Retry limit reached.");
 
-  const latest = await sql`
-    SELECT DISTINCT ON (step_key) step_key,status,attempt
-    FROM workflow_steps WHERE run_id=${runId}
-    ORDER BY step_key, attempt DESC`;
-  const failed = new Map(latest.filter(s => s.status === "Failed").map(s => [String(s.step_key), Number(s.attempt)]));
-  if (failed.size === 0) return;
+  // Atomic claim: only one request can move a retryable run back to Running.
+  // Rapid double-clicks therefore cannot execute the same failed business step twice.
+  const claimed = await sql`
+    UPDATE workflow_runs
+    SET status='Running', retry_count=retry_count+1, completed_at=NULL, error_summary=NULL
+    WHERE id=${runId}
+      AND retry_count < 3
+      AND status IN ('Failed','Partially Completed')
+    RETURNING id,lead_id,retry_count
+  `;
 
-  let stillFailed = false;
-  if (failed.has("ai_analysis")) {
-    const attempt = failed.get("ai_analysis")! + 1;
-    await setStep(runId, "ai_analysis", "Running", { attempt });
-    const input: LeadInput = {
-      idempotencyKey: String(run.idempotency_key),
-      name: String(run.name), company: String(run.company), email: String(run.email),
-      phone: String(run.phone ?? ""), companySize: run.company_size ? Number(run.company_size) : undefined,
-      serviceNeeded: String(run.service_needed), budgetRange: String(run.budget_range ?? ""), message: String(run.message)
-    };
-    try {
-      const a = await analyseLead(input);
-      await sql`UPDATE leads SET category=${a.category},request_type=${a.requestType},urgency=${a.urgency},
-        estimated_value=${a.estimatedValue},department=${a.department},priority=${a.priority},
-        ai_summary=${a.summary},recommended_action=${a.recommendedAction},ai_status='completed',updated_at=now()
-        WHERE id=${run.lead_id}`;
-      await setStep(runId, "ai_analysis", "Completed", { attempt, output: `Retry succeeded: ${a.category} · ${a.priority}` });
-      const retryHours = followUpHours(a.priority);
-      await sql`UPDATE follow_ups SET due_at=now() + ${`${retryHours} hours`}::interval,
-        reason=${`${a.priority} priority rule after AI retry: follow up within ${retryHours} hours.`}
-        WHERE lead_id=${run.lead_id} AND kind='initial' AND status='open'`;
-    } catch (error) {
-      stillFailed = true;
-      await setStep(runId, "ai_analysis", "Failed", { attempt, errorCode:"AI_ANALYSIS_FAILED", errorMessage:error instanceof Error ? error.message : "Unknown AI error", output:"Fallback data remains active." });
+  if (claimed.length === 0) {
+    const rows = await sql`SELECT status,retry_count FROM workflow_runs WHERE id=${runId} LIMIT 1`;
+    if (rows.length === 0) throw new Error("Workflow not found.");
+    if (Number(rows[0].retry_count) >= 3) {
+      await sql`UPDATE workflow_runs
+        SET error_summary='Retry limit reached. Manual intervention is required.'
+        WHERE id=${runId} AND status IN ('Failed','Partially Completed')`;
+      throw new Error("Retry limit reached.");
     }
+    if (String(rows[0].status) === "Running") throw new Error("Retry already in progress.");
+    return;
   }
 
-  if (failed.has("customer_email")) {
-    const attempt = failed.get("customer_email")! + 1;
-    await setStep(runId, "customer_email", "Failed", {
-      attempt,
-      errorCode: "EMAIL_PROVIDER_UNAVAILABLE",
-      errorMessage: "No production email provider is configured.",
-      output: "No email sent. Existing outbox item was not duplicated."
-    });
-    stillFailed = true;
-  }
+  const retryNumber = Number(claimed[0].retry_count);
 
-  await sql`UPDATE workflow_runs SET retry_count=retry_count+1,status=${stillFailed ? "Partially Completed" : "Completed"},
-    error_summary=${stillFailed ? "One or more retried steps still require attention." : null},
-    completed_at=now() WHERE id=${runId}`;
-  await sql`UPDATE leads SET workflow_state=${stillFailed ? "Partially Completed" : "Completed"},updated_at=now() WHERE id=${run.lead_id}`;
+  try {
+    const runs = await sql`
+      SELECT wr.*, l.name,l.company,l.email,l.phone,l.company_size,l.service_needed,l.budget_range,
+        l.message,l.idempotency_key,l.priority
+      FROM workflow_runs wr
+      JOIN leads l ON l.id=wr.lead_id
+      WHERE wr.id=${runId}
+      LIMIT 1
+    `;
+    const run = runs[0];
+
+    const latest = await sql`
+      SELECT DISTINCT ON (step_key) step_key,status,attempt
+      FROM workflow_steps
+      WHERE run_id=${runId}
+      ORDER BY step_key, attempt DESC
+    `;
+    const failed = new Map(
+      latest
+        .filter(step => String(step.status) === "Failed")
+        .map(step => [String(step.step_key), Number(step.attempt)])
+    );
+
+    if (failed.size === 0) {
+      await sql`UPDATE workflow_runs SET status='Completed',completed_at=now(),error_summary=NULL WHERE id=${runId}`;
+      await sql`UPDATE leads SET workflow_state='Completed',updated_at=now() WHERE id=${run.lead_id}`;
+      return;
+    }
+
+    let stillFailed = false;
+
+    if (failed.has("ai_analysis")) {
+      const attempt = failed.get("ai_analysis")! + 1;
+      await setStep(runId, "ai_analysis", "Running", { attempt });
+      const input: LeadInput = {
+        idempotencyKey: String(run.idempotency_key),
+        name: String(run.name),
+        company: String(run.company),
+        email: String(run.email),
+        phone: String(run.phone ?? ""),
+        companySize: run.company_size ? Number(run.company_size) : undefined,
+        serviceNeeded: String(run.service_needed),
+        budgetRange: String(run.budget_range ?? ""),
+        message: String(run.message)
+      };
+
+      try {
+        const analysis = await analyseLead(input);
+        await sql`UPDATE leads SET
+          category=${analysis.category},request_type=${analysis.requestType},urgency=${analysis.urgency},
+          estimated_value=${analysis.estimatedValue},department=${analysis.department},priority=${analysis.priority},
+          ai_summary=${analysis.summary},recommended_action=${analysis.recommendedAction},
+          ai_status='completed',updated_at=now()
+          WHERE id=${run.lead_id}`;
+        await setStep(runId, "ai_analysis", "Completed", {
+          attempt,
+          output: `Retry succeeded: ${analysis.category} · ${analysis.priority}`
+        });
+
+        const hours = followUpHours(analysis.priority);
+        await sql`UPDATE follow_ups SET
+          due_at=now() + ${`${hours} hours`}::interval,
+          reason=${`${analysis.priority} priority rule after AI retry: follow up within ${hours} hours.`}
+          WHERE lead_id=${run.lead_id} AND kind='initial' AND status='open'`;
+      } catch (error) {
+        stillFailed = true;
+        await setStep(runId, "ai_analysis", "Failed", {
+          attempt,
+          errorCode:"AI_ANALYSIS_FAILED",
+          errorMessage:error instanceof Error ? error.message : "Unknown AI error",
+          output:"Fallback data remains active."
+        });
+      }
+    }
+
+    if (failed.has("crm_record")) {
+      const attempt = failed.get("crm_record")! + 1;
+      await setStep(runId, "crm_record", "Running", { attempt });
+      await setStep(runId, "crm_record", "Completed", {
+        attempt,
+        output: "Lead already exists in the internal CRM; no duplicate record was created."
+      });
+    }
+
+    if (failed.has("manager_notification")) {
+      const attempt = failed.get("manager_notification")! + 1;
+      await setStep(runId, "manager_notification", "Running", { attempt });
+      const type = String(run.priority) === "High" ? "high_priority" : "system";
+      await sql`INSERT INTO notifications (lead_id,type,title,body,dedupe_key)
+        VALUES (
+          ${run.lead_id},
+          ${type},
+          ${type === "high_priority" ? "New high-priority lead" : "New lead received"},
+          ${`${String(run.company)} requires manager review.`},
+          ${`lead:${String(run.lead_id)}:manager`}
+        )
+        ON CONFLICT (dedupe_key) DO NOTHING`;
+      await setStep(runId, "manager_notification", "Completed", {
+        attempt,
+        output: "Internal notification confirmed without duplication."
+      });
+    }
+
+    if (failed.has("follow_up")) {
+      const attempt = failed.get("follow_up")! + 1;
+      await setStep(runId, "follow_up", "Running", { attempt });
+      const hours = followUpHours(String(run.priority) as Analysis["priority"]);
+      await sql`INSERT INTO follow_ups (lead_id,kind,due_at,reason)
+        VALUES (
+          ${run.lead_id},
+          'initial',
+          now() + ${`${hours} hours`}::interval,
+          ${`${String(run.priority)} priority retry rule: follow up within ${hours} hours.`}
+        )
+        ON CONFLICT (lead_id,kind) DO NOTHING`;
+      await setStep(runId, "follow_up", "Completed", {
+        attempt,
+        output: "Existing follow-up reused or missing follow-up created once."
+      });
+    }
+
+    if (failed.has("customer_email")) {
+      const attempt = failed.get("customer_email")! + 1;
+      await setStep(runId, "customer_email", "Failed", {
+        attempt,
+        errorCode: "EMAIL_PROVIDER_UNAVAILABLE",
+        errorMessage: "No production email provider is configured.",
+        output: "No email sent. The existing outbox event was not duplicated."
+      });
+      stillFailed = true;
+    }
+
+    const handled = new Set(["ai_analysis","crm_record","manager_notification","follow_up","customer_email"]);
+    for (const [key, previousAttempt] of failed) {
+      if (handled.has(key)) continue;
+      const attempt = previousAttempt + 1;
+      await setStep(runId, key, "Failed", {
+        attempt,
+        errorCode: "MANUAL_INTERVENTION_REQUIRED",
+        errorMessage: "This step cannot be safely replayed automatically.",
+        output: "No business operation was repeated."
+      });
+      stillFailed = true;
+    }
+
+    const finalStatus = stillFailed ? "Partially Completed" : "Completed";
+    await sql`UPDATE workflow_runs SET
+      status=${finalStatus},
+      error_summary=${stillFailed ? "One or more retried steps still require attention." : null},
+      completed_at=now()
+      WHERE id=${runId}`;
+    await sql`UPDATE leads SET workflow_state=${finalStatus},updated_at=now() WHERE id=${run.lead_id}`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unexpected retry failure";
+    await sql`UPDATE workflow_runs SET
+      status='Partially Completed',
+      completed_at=now(),
+      error_summary=${`Retry ${retryNumber} failed: ${message}`}
+      WHERE id=${runId}`;
+    await sql`UPDATE leads SET workflow_state='Partially Completed',updated_at=now()
+      WHERE id=${claimed[0].lead_id}`;
+    await sql`INSERT INTO notifications (lead_id,type,title,body,dedupe_key)
+      VALUES (
+        ${claimed[0].lead_id},
+        'workflow_failed',
+        'Workflow retry needs review',
+        ${`Retry ${retryNumber} failed safely. Previous completed actions were preserved.`},
+        ${`workflow:${runId}:retry:${retryNumber}:failed`}
+      )
+      ON CONFLICT (dedupe_key) DO NOTHING`;
+    throw error;
+  }
 }

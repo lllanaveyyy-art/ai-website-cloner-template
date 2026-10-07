@@ -3,6 +3,8 @@ name: Project 4 CI
 on:
   push:
     branches: [project-4-ai-automation]
+  pull_request:
+    branches: [project-4-ai-automation]
   workflow_dispatch:
 
 jobs:

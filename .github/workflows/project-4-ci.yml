@@ -1,0 +1,33 @@
+name: Project 4 CI
+
+on:
+  push:
+    branches: [project-4-ai-automation]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: TypeScript
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+        env:
+          AUTH_SECRET: ci-only-secret-not-for-production
+          ADMIN_EMAIL: admin@arcflow.test
+          ADMIN_PASSWORD: ci-password
+          MANAGER_EMAIL: manager@arcflow.test
+          MANAGER_PASSWORD: ci-password

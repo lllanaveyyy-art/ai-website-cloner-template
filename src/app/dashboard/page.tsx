@@ -23,7 +23,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   const page = Math.max(1, Number(one(q.page)) || 1);
   const pageSize = 12;
   const offset = (page - 1) * pageSize;
-  const fromDate = date === "today" ? new Date(Date.now()-24*3600_000).toISOString() : date === "7d" ? new Date(Date.now()-7*24*3600_000).toISOString() : date === "30d" ? new Date(Date.now()-30*24*3600_000).toISOString() : null;
+  const dateInterval = date === "today" ? "1 day" : date === "7d" ? "7 days" : date === "30d" ? "30 days" : "";
   const like = `%${search}%`;
   const sql = db();
 
@@ -44,7 +44,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         AND (${category}='' OR category=${category})
         AND (${stage}='' OR pipeline_stage=${stage})
         AND (${workflow}='' OR workflow_state=${workflow})
-        AND (${fromDate}::timestamptz IS NULL OR created_at >= ${fromDate})
+        AND (${dateInterval}='' OR created_at >= now() - ${dateInterval}::interval)
       ORDER BY created_at DESC LIMIT ${pageSize} OFFSET ${offset}`,
     sql`SELECT count(*)::int total FROM leads
       WHERE (${search}='' OR name ILIKE ${like} OR company ILIKE ${like} OR email ILIKE ${like} OR coalesce(ai_summary,'') ILIKE ${like})
@@ -52,9 +52,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         AND (${category}='' OR category=${category})
         AND (${stage}='' OR pipeline_stage=${stage})
         AND (${workflow}='' OR workflow_state=${workflow})
-        AND (${fromDate}::timestamptz IS NULL OR created_at >= ${fromDate})`,
+        AND (${dateInterval}='' OR created_at >= now() - ${dateInterval}::interval)`,
     sql`SELECT DISTINCT category FROM leads ORDER BY category`,
-    sql`SELECT f.id,f.lead_id,f.due_at,f.reason,l.name,l.company
+    sql`SELECT f.id,f.lead_id,f.due_at,f.reason,l.name,l.company,(f.due_at < now()) AS is_overdue
       FROM follow_ups f JOIN leads l ON l.id=f.lead_id
       WHERE f.status='open' ORDER BY f.due_at ASC LIMIT 8`,
     sql`SELECT
@@ -133,7 +133,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
               <div className="follow-summary"><span><strong>{followUpSummary[0]?.overdue ?? 0}</strong> overdue</span><span><strong>{followUpSummary[0]?.due_today ?? 0}</strong> due today</span><span><strong>{followUpSummary[0]?.upcoming ?? 0}</strong> upcoming</span></div>
               <div className="follow-list">
               {followUps.map(f=>{
-                const isOverdue = new Date(String(f.due_at)).getTime() < Date.now();
+                const isOverdue = Boolean(f.is_overdue);
                 return <div className={`follow-item ${isOverdue ? "overdue":""}`} key={String(f.id)}>
                   <div><Link href={`/dashboard/leads/${f.lead_id}`}><strong>{String(f.company)}</strong></Link><div className="subtle">{isOverdue ? "Overdue" : "Due"} {new Date(String(f.due_at)).toLocaleString("en-GB",{dateStyle:"medium",timeStyle:"short"})}</div></div>
                   <form action={completeFollowUpAction}><input type="hidden" name="id" value={String(f.id)}/><input type="hidden" name="leadId" value={String(f.lead_id)}/><button className="btn btn-secondary btn-sm">Done</button></form>

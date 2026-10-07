@@ -54,7 +54,7 @@ export async function updateLeadAction(formData: FormData) {
   const priority = String(formData.get("priority") ?? "");
   const category = String(formData.get("category") ?? "").trim();
   const stage = String(formData.get("pipelineStage") ?? "");
-  if (!id || !["High","Normal","Low"].includes(priority) || !["New","Qualified","Contacted","Discovery","Proposal","Won","Lost"].includes(stage) || category.length < 2) return;
+  if (!id || !["High","Normal","Low"].includes(priority) || !["New","Qualified","Contacted","Discovery","Proposal","Won","Lost"].includes(stage) || category.length < 2 || category.length > 80) return;
   await db()`UPDATE leads SET priority=${priority},category=${category},pipeline_stage=${stage},updated_at=now() WHERE id=${id}`;
   revalidatePath(`/dashboard/leads/${id}`);
   revalidatePath("/dashboard");

@@ -140,8 +140,26 @@ export async function startLeadWorkflow(input: LeadInput) {
   });
 
   if (result.duplicate) return result;
-  await continueWorkflow(result.runId, result.leadId, input);
-  return result;
+  try {
+    await continueWorkflow(result.runId, result.leadId, input);
+    return { ...result, workflowFailed: false };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unexpected workflow failure";
+    try {
+      await sql`UPDATE workflow_runs SET status='Failed',completed_at=now(),
+        duration_ms=GREATEST(0,(EXTRACT(EPOCH FROM (now()-started_at))*1000)::int),error_summary=${message}
+        WHERE id=${result.runId}`;
+      await sql`UPDATE leads SET workflow_state='Failed',updated_at=now() WHERE id=${result.leadId}`;
+      await sql`UPDATE workflow_steps SET status='Failed',completed_at=now(),error_code='UNEXPECTED_WORKFLOW_ERROR',
+        error_message=${message} WHERE run_id=${result.runId} AND status='Running'`;
+      await sql`INSERT INTO notifications (lead_id,type,title,body,dedupe_key)
+        VALUES (${result.leadId},'workflow_failed','Workflow failed','The lead is saved, but automation needs manual review.',${`workflow:${result.runId}:unexpected`})
+        ON CONFLICT (dedupe_key) DO NOTHING`;
+    } catch {
+      // The lead was committed before automation started; a persistent database outage may prevent failure logging.
+    }
+    return { ...result, workflowFailed: true };
+  }
 }
 
 async function continueWorkflow(runId: string, leadId: string, input: LeadInput) {

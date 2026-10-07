@@ -97,6 +97,8 @@ export async function retryWorkflowAction(formData: FormData) {
   if (!runId) return;
   try {
     await retryWorkflow(runId);
+  } catch {
+    // retryWorkflow persists a safe, user-readable workflow state before returning.
   } finally {
     revalidatePath(`/dashboard/runs/${runId}`);
     revalidatePath("/dashboard/runs");
